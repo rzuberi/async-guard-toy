@@ -12,13 +12,16 @@ from .evaluation import (
     per_environment_auc,
     roc_payload,
     select_prefix_rows,
+    select_failure_cases,
     split_episode_rows,
     summarise_episode_scores,
+    threshold_metrics,
     write_csv,
     write_json,
 )
 from .monitors import fit_learned_monitor, rules_monitor, score_learned_monitor
 from .plots import plot_environment_mix, plot_monitor_roc, plot_score_trajectories
+from .reporting import write_benchmark_report
 from .simulator import FEATURE_NAMES, generate_dataset, write_jsonl
 
 
@@ -27,9 +30,11 @@ def _ensure_directory(path):
         os.makedirs(path)
 
 
-def run_pipeline(output_dir, figure_dir, episodes_per_env, seed, train_ratio):
+def run_pipeline(output_dir, figure_dir, report_path, episodes_per_env, seed, train_ratio):
     _ensure_directory(output_dir)
     _ensure_directory(figure_dir)
+    if os.path.dirname(report_path):
+        _ensure_directory(os.path.dirname(report_path))
 
     dataset = generate_dataset(episodes_per_env=episodes_per_env, seed=seed)
     prefix_rows = dataset["prefix_rows"]
@@ -65,17 +70,25 @@ def run_pipeline(output_dir, figure_dir, episodes_per_env, seed, train_ratio):
             "auc": roc_results["Rules monitor"]["auc"],
             "latency_at_0_65": compute_latency(rules_summary, threshold),
             "per_environment_auc": per_environment_auc(rules_summary, "horizon_score"),
+            "threshold_metrics": threshold_metrics(rules_summary, "horizon_score", threshold),
         },
         "learned_monitor": {
             "auc": roc_results["Learned monitor"]["auc"],
             "latency_at_0_65": compute_latency(learned_summary, threshold),
             "per_environment_auc": per_environment_auc(learned_summary, "horizon_score"),
+            "threshold_metrics": threshold_metrics(learned_summary, "horizon_score", threshold),
         },
         "splits": {
             "train_episodes": len(train_ids),
             "test_episodes": len(test_ids),
         },
     }
+    failure_cases = select_failure_cases(
+        scored_test_rows,
+        learned_summary,
+        "horizon_score",
+        threshold,
+    )
 
     write_jsonl(os.path.join(output_dir, "prefix_logs.jsonl"), prefix_rows)
     write_jsonl(os.path.join(output_dir, "scored_test_prefix_logs.jsonl"), scored_test_rows)
@@ -130,6 +143,7 @@ def run_pipeline(output_dir, figure_dir, episodes_per_env, seed, train_ratio):
         ],
     )
     write_json(os.path.join(output_dir, "metrics.json"), metrics)
+    write_json(os.path.join(output_dir, "example_failure_cases.json"), failure_cases)
 
     plot_monitor_roc(roc_results, os.path.join(figure_dir, "monitor_roc.svg"))
     plot_score_trajectories(
@@ -141,6 +155,7 @@ def run_pipeline(output_dir, figure_dir, episodes_per_env, seed, train_ratio):
         episode_rows,
         os.path.join(figure_dir, "environment_mix.svg"),
     )
+    write_benchmark_report(report_path, metrics, failure_cases)
     return metrics
 
 
@@ -148,6 +163,7 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(description="Run the AsyncGuard-Toy experiment pipeline.")
     parser.add_argument("--output-dir", default="artifacts")
     parser.add_argument("--figure-dir", default="docs/figures")
+    parser.add_argument("--report-path", default="docs/benchmark_report.md")
     parser.add_argument("--episodes-per-env", type=int, default=80)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--train-ratio", type=float, default=0.7)
@@ -160,6 +176,7 @@ def main():
     metrics = run_pipeline(
         output_dir=args.output_dir,
         figure_dir=args.figure_dir,
+        report_path=args.report_path,
         episodes_per_env=args.episodes_per_env,
         seed=args.seed,
         train_ratio=args.train_ratio,

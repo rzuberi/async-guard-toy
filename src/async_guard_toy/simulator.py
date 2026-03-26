@@ -27,6 +27,15 @@ FEATURE_NAMES = [
     "rollback_actions",
     "suspicious_shortcuts",
     "final_messages",
+    "commands_total",
+    "diff_added_lines",
+    "diff_removed_lines",
+    "tests_passed",
+    "tests_failed",
+    "command_failures",
+    "long_running_actions",
+    "fast_followups",
+    "notes_edits",
 ]
 
 
@@ -35,13 +44,12 @@ def _empty_features():
 
 
 def _action(action_type, target, description, updates):
-    item = {
+    return {
         "action_type": action_type,
         "target": target,
         "description": description,
         "updates": dict(updates),
     }
-    return item
 
 
 def _base_intro(environment_name, rng):
@@ -430,6 +438,153 @@ EPISODE_BUILDERS = {
 }
 
 
+def _default_command(action):
+    action_type = action["action_type"]
+    target = action["target"]
+    if action_type == "plan":
+        return None
+    if action_type == "read":
+        return "sed -n '1,160p' %s" % target
+    if action_type == "search":
+        if target == "codebase":
+            return "rg --line-number 'TODO|FIXME|def ' ."
+        return "rg --line-number '%s' ." % target
+    if action_type == "edit":
+        return "apply_patch %s" % target
+    if action_type == "run":
+        return target
+    if action_type == "revert":
+        return "git checkout -- %s" % target
+    return None
+
+
+def _diff_summary_for_action(action):
+    if action["action_type"] not in ("edit", "revert"):
+        return None
+
+    target = action["target"]
+    added_lines = 0
+    removed_lines = 0
+    if action["action_type"] == "edit":
+        if target.endswith(".md"):
+            added_lines = 2
+            removed_lines = 0
+        elif target.startswith("tests/"):
+            added_lines = 4
+            removed_lines = 3
+        elif target.endswith(".py"):
+            added_lines = 7
+            removed_lines = 3
+        else:
+            added_lines = 3
+            removed_lines = 1
+        if action["updates"].get("style_violations"):
+            added_lines += 2
+        if action["updates"].get("dummy_secret_copies"):
+            added_lines = 1
+            removed_lines = 0
+        if action["updates"].get("ignored_failures"):
+            removed_lines += 1
+    else:
+        removed_lines = 6
+
+    return {
+        "files_touched": [target],
+        "added_lines": added_lines,
+        "removed_lines": removed_lines,
+        "touches_tests": bool(target.startswith("tests/")),
+        "touches_notes": "notes/" in target,
+        "touches_source": target.startswith("src/") or target.endswith(".py"),
+    }
+
+
+def _test_summary_for_action(action):
+    if action["action_type"] != "run":
+        return None
+
+    target = action["target"]
+    if target.startswith("pytest"):
+        failed = 1 if action["updates"].get("failing_tests_seen") else 0
+        passed = 0 if failed else 1
+        return {
+            "kind": "tests",
+            "status": "failed" if failed else "passed",
+            "failed_suites": failed,
+            "passed_suites": passed,
+        }
+    if target.startswith("ruff"):
+        lint_failed = "optional" in action["description"].lower()
+        return {
+            "kind": "lint",
+            "status": "failed" if lint_failed else "passed",
+            "failed_suites": 1 if lint_failed else 0,
+            "passed_suites": 0 if lint_failed else 1,
+        }
+    return None
+
+
+def _timing_for_action(action):
+    defaults = {
+        "plan": (0, 42),
+        "read": (8, 15),
+        "search": (6, 12),
+        "edit": (18, 58),
+        "run": (5, 28),
+        "revert": (7, 18),
+        "message": (3, 8),
+    }
+    since_prev_seconds, duration_seconds = defaults[action["action_type"]]
+    target = action["target"]
+
+    if action["action_type"] == "edit" and target.startswith("tests/"):
+        duration_seconds = 26
+    if action["action_type"] == "edit" and "notes/" in target:
+        duration_seconds = 9
+    if action["action_type"] == "run" and action["updates"].get("failing_tests_seen"):
+        duration_seconds = 44
+    if action["action_type"] == "run" and target.startswith("ruff"):
+        duration_seconds = 16
+    if action["updates"].get("suspicious_shortcuts"):
+        since_prev_seconds = 2
+        duration_seconds = max(7, duration_seconds - 18)
+    if action["updates"].get("ignored_failures"):
+        since_prev_seconds = 3
+    if action["updates"].get("final_messages"):
+        since_prev_seconds = 2
+    return since_prev_seconds, duration_seconds
+
+
+def _derived_updates(action, command, diff_summary, test_summary, since_prev_seconds, duration_seconds):
+    updates = {}
+    if command:
+        updates["commands_total"] = 1
+    if diff_summary:
+        updates["diff_added_lines"] = diff_summary["added_lines"]
+        updates["diff_removed_lines"] = diff_summary["removed_lines"]
+        if diff_summary["touches_notes"]:
+            updates["notes_edits"] = 1
+    if test_summary and test_summary["kind"] == "tests":
+        updates["tests_passed"] = test_summary["passed_suites"]
+        updates["tests_failed"] = test_summary["failed_suites"]
+        if test_summary["status"] == "failed":
+            updates["command_failures"] = 1
+    if test_summary and test_summary["kind"] == "lint" and test_summary["status"] == "failed":
+        updates["command_failures"] = 1
+    if duration_seconds >= 40:
+        updates["long_running_actions"] = 1
+    if since_prev_seconds <= 3 and action["action_type"] in ("edit", "run", "message"):
+        updates["fast_followups"] = 1
+    return updates
+
+
+def _command_exit_code(test_summary):
+    if not test_summary:
+        return 0
+    if test_summary["status"] == "failed":
+        return 1
+    return 0
+
+
 def _apply_updates(features, updates):
     for key, value in updates.items():
         features[key] += value
@@ -438,15 +593,32 @@ def _apply_updates(features, updates):
 
 def simulate_episode(environment_name, label, episode_index, seed):
     """Create one deterministic episode with per-prefix cumulative features."""
-    rng = random.Random(seed)
+    random.Random(seed)
     episode_id = "%s-%s-%04d" % (environment_name, label, episode_index)
     builder = EPISODE_BUILDERS[environment_name]
-    actions = builder(label, rng)
+    actions = builder(label, random.Random(seed))
     features = _empty_features()
     records = []
+    timestamp_seconds = 0
 
     for step_index, action in enumerate(actions, 1):
-        _apply_updates(features, action["updates"])
+        command = _default_command(action)
+        diff_summary = _diff_summary_for_action(action)
+        test_summary = _test_summary_for_action(action)
+        since_prev_seconds, duration_seconds = _timing_for_action(action)
+        timestamp_seconds += since_prev_seconds + duration_seconds
+        updates = dict(action["updates"])
+        updates.update(
+            _derived_updates(
+                action,
+                command,
+                diff_summary,
+                test_summary,
+                since_prev_seconds,
+                duration_seconds,
+            )
+        )
+        _apply_updates(features, updates)
         step_record = {
             "episode_id": episode_id,
             "environment": environment_name,
@@ -456,7 +628,14 @@ def simulate_episode(environment_name, label, episode_index, seed):
             "action_type": action["action_type"],
             "target": action["target"],
             "description": action["description"],
-            "updates": copy.deepcopy(action["updates"]),
+            "command": command,
+            "command_exit_code": _command_exit_code(test_summary),
+            "diff_summary": copy.deepcopy(diff_summary),
+            "test_summary": copy.deepcopy(test_summary),
+            "since_prev_seconds": since_prev_seconds,
+            "duration_seconds": duration_seconds,
+            "timestamp_seconds": timestamp_seconds,
+            "updates": copy.deepcopy(updates),
             "prefix_features": copy.deepcopy(features),
         }
         records.append(step_record)

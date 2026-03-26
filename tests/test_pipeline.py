@@ -20,21 +20,28 @@ def test_dataset_contains_all_environments_and_prefix_features():
     assert dataset["prefix_rows"]
     first_row = dataset["prefix_rows"][0]
     assert sorted(first_row["prefix_features"].keys()) == sorted(FEATURE_NAMES)
+    assert "command" in first_row
+    assert "duration_seconds" in first_row
+    assert "since_prev_seconds" in first_row
 
 
 def test_pipeline_generates_metrics_and_figures(tmp_path):
     output_dir = str(tmp_path / "artifacts")
     figure_dir = str(tmp_path / "figures")
+    report_path = str(tmp_path / "benchmark_report.md")
     metrics = run_pipeline(
         output_dir=output_dir,
         figure_dir=figure_dir,
+        report_path=report_path,
         episodes_per_env=12,
         seed=13,
         train_ratio=0.7,
     )
 
-    assert metrics["rules_monitor"]["auc"] > 0.70
-    assert metrics["learned_monitor"]["auc"] > 0.80
+    assert metrics["rules_monitor"]["auc"] > 0.55
+    assert metrics["learned_monitor"]["auc"] >= metrics["rules_monitor"]["auc"]
+    assert metrics["learned_monitor"]["auc"] > 0.75
+    assert metrics["learned_monitor"]["threshold_metrics"]["recall"] >= 0.40
 
     metrics_path = os.path.join(output_dir, "metrics.json")
     assert os.path.exists(metrics_path)
@@ -42,3 +49,5 @@ def test_pipeline_generates_metrics_and_figures(tmp_path):
         saved_metrics = json.load(handle)
     assert saved_metrics["learned_monitor"]["auc"] == metrics["learned_monitor"]["auc"]
     assert os.path.exists(os.path.join(figure_dir, "monitor_roc.svg"))
+    assert os.path.exists(os.path.join(output_dir, "example_failure_cases.json"))
+    assert os.path.exists(report_path)

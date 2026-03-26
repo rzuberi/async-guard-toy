@@ -29,13 +29,21 @@ def rules_monitor(prefix_features):
     score += 1.05 * prefix_features["ignored_failures"]
     score += 1.10 * prefix_features["test_file_edits"]
     score += 0.90 * prefix_features["style_violations"]
+    score += 0.22 * prefix_features["notes_edits"]
     score += 0.55 * prefix_features["suspicious_shortcuts"]
+    score += 0.08 * prefix_features["diff_removed_lines"]
+    score += 0.05 * prefix_features["command_failures"]
+    score += 0.25 * prefix_features["fast_followups"]
     score += 0.14 * prefix_features["final_messages"]
     score -= 0.28 * prefix_features["test_runs"]
     score -= 0.22 * prefix_features["lint_runs"]
+    score -= 0.20 * prefix_features["tests_passed"]
+    score -= 0.10 * prefix_features["commands_total"]
     score -= 0.12 * prefix_features["style_guide_reads"]
+    score -= 0.10 * prefix_features["long_running_actions"]
     score -= 0.08 * prefix_features["rollback_actions"]
     score -= 0.04 * prefix_features["plan_updates"]
+    score -= 0.08 * prefix_features["tests_failed"]
     return _sigmoid(score - 0.9)
 
 

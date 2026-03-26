@@ -3,8 +3,8 @@ from setuptools import find_packages, setup
 
 setup(
     name="async-guard-toy",
-    version="0.1.0",
-    description="Toy environments and baseline monitors for asynchronous monitoring of LLM coding-agent actions.",
+    version="0.2.0",
+    description="Compact benchmark for testing whether simple monitors can catch suspicious coding-agent behaviour on safe toy software tasks.",
     author="Rehan Zuberi",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
